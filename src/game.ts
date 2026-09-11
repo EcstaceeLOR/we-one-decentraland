@@ -107,7 +107,11 @@ export function setupGame() {
   })
 
   bus.on('we1:start', (message: StartMessage) => {
-    if (message.toId !== id() || message.sessionId !== appState.sessionId) return
+    if (
+      message.toId !== id() ||
+      message.sessionId !== appState.sessionId ||
+      appState.phase !== 'bonded'
+    ) return
     beginRounds(message.firstPlayerId)
   })
 
@@ -115,6 +119,7 @@ export function setupGame() {
     if (
       message.toId !== id() ||
       message.sessionId !== appState.sessionId ||
+      appState.phase !== 'playing' ||
       message.round !== appState.round ||
       message.fromId !== appState.expectedPlayerId
     ) return
@@ -130,6 +135,7 @@ export function setupGame() {
     if (
       message.toId !== id() ||
       message.sessionId !== appState.sessionId ||
+      appState.phase !== 'playing' ||
       message.round !== appState.round
     ) return
     applyRoundResult(message.success, message.delayMs)
@@ -148,6 +154,11 @@ export function invitePlayer(player: PlayerSummary) {
     toId: player.userId,
     nonce
   } satisfies InviteMessage)
+}
+
+export function cancelInvite() {
+  appState.outgoingTo = undefined
+  appState.status = 'Invitation cancelled. Choose someone when it feels right.'
 }
 
 export function acceptInvite() {
@@ -190,7 +201,7 @@ export function declineInvite() {
 export function startBondGame() {
   const local = appState.localPlayer
   const partner = appState.partner
-  if (!local || !partner) return
+  if (!local || !partner || appState.phase !== 'bonded') return
   const firstPlayerId = [local.userId, partner.userId].sort()[0]
   beginRounds(firstPlayerId)
   bus.emit('we1:start', {
@@ -332,7 +343,11 @@ function refreshRoster() {
   const seen: Record<string, boolean> = {}
   const players: PlayerSummary[] = []
   for (const [, identity] of engine.getEntitiesWith(PlayerIdentityData)) {
-    if (!identity.address || identity.address === localId || seen[identity.address]) continue
+    if (
+      !identity.address ||
+      identity.address.toLowerCase() === localId.toLowerCase() ||
+      seen[identity.address]
+    ) continue
     seen[identity.address] = true
     const profile = getPlayer({ userId: identity.address })
     players.push({

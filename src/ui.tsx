@@ -2,6 +2,7 @@ import { Color4 } from '@dcl/sdk/math'
 import ReactEcs, { Button, Label, ReactEcsRenderer, UiEntity } from '@dcl/sdk/react-ecs'
 import {
   acceptInvite,
+  cancelInvite,
   declineInvite,
   invitePlayer,
   resetExperience,
@@ -69,21 +70,37 @@ const FindingPanel = () => (
   <UiEntity uiTransform={{ width: '100%', height: 420, flexDirection: 'column' }}>
     {Text('Choose a person, not a username to collect.', 62, 28)}
     {Text('Your Mote will belong to the relationship between you.', 64, 21, COLORS.muted)}
-    <UiEntity
-      uiTransform={{ width: '100%', height: 210, flexDirection: 'column', overflow: 'scroll', margin: '8px 0' }}
-    >
-      {appState.players.length > 0
-        ? appState.players.map(PlayerButton)
-        : Text('No other explorer is visible yet.', 64, 22, COLORS.muted)}
-    </UiEntity>
-    <Button
-      value='Practice the pulse'
-      variant='secondary'
-      fontSize={23}
-      disabled={!appState.localPlayer}
-      uiTransform={{ width: '100%', height: 64, margin: '8px 0' }}
-      onMouseDown={startPractice}
-    />
+    {appState.outgoingTo ? (
+      <UiEntity uiTransform={{ width: '100%', height: 282, flexDirection: 'column', margin: '8px 0' }}>
+        {Text(`Waiting for ${appState.outgoingTo.name}...`, 84, 26, COLORS.cyan)}
+        {Text('A WE/1 bond always requires a clear yes from both people.', 80, 21, COLORS.muted)}
+        <Button
+          value='Cancel invitation'
+          variant='secondary'
+          fontSize={22}
+          uiTransform={{ width: '100%', height: 64, margin: '12px 0' }}
+          onMouseDown={cancelInvite}
+        />
+      </UiEntity>
+    ) : (
+      <UiEntity uiTransform={{ width: '100%', height: 282, flexDirection: 'column' }}>
+        <UiEntity
+          uiTransform={{ width: '100%', height: 202, flexDirection: 'column', overflow: 'scroll', margin: '4px 0' }}
+        >
+          {appState.players.length > 0
+            ? appState.players.map(PlayerButton)
+            : Text('No other explorer is visible yet.', 64, 22, COLORS.muted)}
+        </UiEntity>
+        <Button
+          value='Practice the pulse'
+          variant='secondary'
+          fontSize={23}
+          disabled={!appState.localPlayer}
+          uiTransform={{ width: '100%', height: 64, margin: '8px 0' }}
+          onMouseDown={startPractice}
+        />
+      </UiEntity>
+    )}
   </UiEntity>
 )
 
