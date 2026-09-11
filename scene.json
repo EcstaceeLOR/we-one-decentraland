@@ -2,18 +2,18 @@
   "ecs7": true,
   "runtimeVersion": "7",
   "display": {
-    "title": "SDK7 Scene Template",
-    "description": "template scene with SDK7",
+    "title": "WE/1 - A Creature Owned by a Relationship",
+    "description": "Meet another explorer, create a shared Mote, and grow it through a mobile-first cooperative heartbeat ritual.",
     "navmapThumbnail": "images/scene-thumbnail.png",
     "favicon": "favicon_asset"
   },
   "owner": "",
   "contact": {
-    "name": "SDK",
+    "name": "WE/1 Team",
     "email": ""
   },
   "main": "bin/index.js",
-  "tags": [],
+  "tags": ["social", "mobile", "cooperative", "friendzone", "multiplayer"],
   "scene": {
     "parcels": [
       "0,0"

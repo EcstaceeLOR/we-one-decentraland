@@ -1,15 +1,23 @@
-// We define the empty imports so the auto-complete feature works as expected.
-import {} from '@dcl/sdk/math'
-import { engine } from '@dcl/sdk/ecs'
-
-import { changeColorSystem, circularSystem } from './systems'
+import { engine, InputAction, TouchScreenControls } from '@dcl/sdk/ecs'
+import { setupGame, updateGameSystem } from './game'
+import { animateMoteSystem } from './mote'
 import { setupUi } from './ui'
 
 export function main() {
-  // Defining behavior. See `src/systems.ts` file.
-  engine.addSystem(circularSystem)
-  engine.addSystem(changeColorSystem)
+  // The native mobile HUD becomes a deliberate part of the game: the large
+  // central action button sends or answers a heartbeat, while the joystick
+  // remains available for exploring and meeting other players.
+  TouchScreenControls.setMainAction(InputAction.IA_PRIMARY)
+  TouchScreenControls.hide([
+    InputAction.IA_SECONDARY,
+    InputAction.IA_ACTION_3,
+    InputAction.IA_ACTION_4,
+    InputAction.IA_ACTION_5,
+    InputAction.IA_ACTION_6
+  ])
 
-  // draw UI. Here is the logic to spawn cubes.
+  setupGame()
   setupUi()
+  engine.addSystem(updateGameSystem)
+  engine.addSystem(animateMoteSystem)
 }

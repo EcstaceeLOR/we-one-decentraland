@@ -1,7 +1,7 @@
 {
-  "name": "dcl-project",
+  "name": "we-one-decentraland",
   "version": "1.0.0",
-  "description": "SDK7 Template scene",
+  "description": "WE/1 mobile-first social bonding game for Decentraland",
   "scripts": {
     "start": "sdk-commands start",
     "deploy": "sdk-commands deploy",
