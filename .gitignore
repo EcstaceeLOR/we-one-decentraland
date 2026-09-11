@@ -12,3 +12,4 @@ yarn-error.log*
 .cursor/
 agent/
 skills-lock.json
+.tools/
