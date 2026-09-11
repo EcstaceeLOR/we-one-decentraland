@@ -46,6 +46,7 @@ const PlayerButton = (player: PlayerSummary) => (
     value={`Connect with ${player.name}`}
     variant='secondary'
     fontSize={23}
+    disabled={!appState.serverAlive}
     uiTransform={{ width: '100%', height: 64, margin: '6px 0' }}
     onMouseDown={() => invitePlayer(player)}
   />
@@ -126,14 +127,16 @@ const InvitePanel = () => (
 )
 
 const BondedPanel = () => (
-  <UiEntity uiTransform={{ width: '100%', height: 320, flexDirection: 'column' }}>
+  <UiEntity uiTransform={{ width: '100%', height: 340, flexDirection: 'column' }}>
     {Text(`You + ${appState.partner?.name ?? 'your partner'}`, 64, 30, COLORS.cyan)}
-    {Text('Eight alternating pulses. Listen, answer, switch roles.', 72, 22, COLORS.muted)}
-    {Text('No countdown sync. No perfect network required. Just attention.', 70, 21, COLORS.muted)}
+    {Text(`MOTE LEVEL ${appState.bondLevel}  ·  ${appState.totalSessions} reunions  ·  ${appState.streak} day streak`, 52, 19, COLORS.pink)}
+    {Text('Eight alternating pulses. Listen, answer, switch roles.', 58, 22, COLORS.muted)}
+    {Text('This bond belongs to both of you and returns when you reunite.', 58, 20, COLORS.muted)}
     <Button
       value='Begin Shared Heartbeat'
       variant='primary'
       fontSize={25}
+      disabled={!appState.serverAlive}
       uiTransform={{ width: '100%', height: 78, margin: '14px 0' }}
       onMouseDown={startBondGame}
     />
@@ -151,9 +154,9 @@ function actionLabel() {
 
 function actionDisabled() {
   if (appState.practice) return appState.waitingForResponse
-  return !appState.pulseReady && (
+  return !appState.serverAlive || (!appState.pulseReady && (
     appState.expectedPlayerId !== appState.localPlayer?.userId || appState.waitingForResponse
-  )
+  ))
 }
 
 const PlayingPanel = () => (
@@ -189,10 +192,11 @@ const PlayingPanel = () => (
 )
 
 const CompletePanel = () => (
-  <UiEntity uiTransform={{ width: '100%', height: 320, flexDirection: 'column' }}>
+  <UiEntity uiTransform={{ width: '100%', height: 340, flexDirection: 'column' }}>
     {Text(appState.practice ? 'Practice complete' : 'Your bond changed the Mote', 70, 30, COLORS.cyan)}
     {Text(`${appState.score}/${TOTAL_ROUNDS} pulses connected`, 64, 25)}
-    {Text(appState.practice ? 'Now create one that belongs to two real people.' : 'Return together to deepen its form.', 72, 22, COLORS.muted)}
+    {!appState.practice && Text(`LEVEL ${appState.bondLevel}  ·  ${appState.totalPulses} lifetime pulses  ·  ${appState.streak} day streak`, 52, 19, COLORS.pink)}
+    {Text(appState.practice ? 'Now create one that belongs to two real people.' : appState.saved ? 'Return together to deepen its form.' : 'Your save is retrying automatically.', 62, 21, COLORS.muted)}
     <Button
       value='Meet someone new'
       variant='primary'
@@ -233,7 +237,7 @@ const WeOneUi = () => (
           uiTransform={{ width: 150, height: 70 }}
         />
         <Label
-          value='WE ONE'
+          value={appState.serverAlive ? 'WE ONE  ·  LIVE' : 'WE ONE  ·  WAKING'}
           fontSize={19}
           color={COLORS.pink}
           textAlign='middle-left'

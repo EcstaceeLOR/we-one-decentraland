@@ -1,9 +1,20 @@
 import { engine, InputAction, TouchScreenControls } from '@dcl/sdk/ecs'
-import { setupGame, updateGameSystem } from './game'
-import { animateMoteSystem } from './mote'
-import { setupUi } from './ui'
+import { isServer } from '@dcl/sdk/network'
+import './shared/messages'
+import './shared/schemas'
 
-export function main() {
+export async function main() {
+  if (isServer()) {
+    const { initServer } = await import('./server/server')
+    initServer()
+    return
+  }
+
+  const [{ setupGame, updateGameSystem }, { animateMoteSystem }, { setupUi }] = await Promise.all([
+    import('./game'),
+    import('./mote'),
+    import('./ui')
+  ])
   // The native mobile HUD becomes a deliberate part of the game: the large
   // central action button sends or answers a heartbeat, while the joystick
   // remains available for exploring and meeting other players.

@@ -5,52 +5,25 @@ import {
   PlayerIdentityData,
   PointerEventType
 } from '@dcl/sdk/ecs'
-import { MessageBus } from '@dcl/sdk/message-bus'
+import { isStateSyncronized } from '@dcl/sdk/network'
 import { getPlayer } from '@dcl/sdk/src/players'
-import { appState, PlayerSummary, RESPONSE_WINDOW_MS, TOTAL_ROUNDS } from './state'
+import { room } from './shared/messages'
+import { ServerStatus } from './shared/schemas'
+import { appState, PlayerSummary, TOTAL_ROUNDS } from './state'
 import { createBondMote, destroyBondMote, pulseMote, setMoteStage } from './mote'
 
-type InviteMessage = {
-  fromId: string
-  fromName: string
-  toId: string
-  nonce: string
-}
-
-type InviteAnswerMessage = {
-  accepted: boolean
-  fromId: string
-  fromName: string
-  toId: string
-  nonce: string
-  sessionId: string
-}
-
-type StartMessage = {
-  sessionId: string
-  fromId: string
-  toId: string
-  firstPlayerId: string
-}
-
-type PulseMessage = {
-  sessionId: string
-  round: number
-  fromId: string
-  toId: string
-}
-
-type ResponseMessage = {
-  sessionId: string
-  round: number
-  fromId: string
-  toId: string
-  success: boolean
-  delayMs: number
-}
-
-const bus = new MessageBus()
+const SERVER_FRESHNESS_MS = 6500
 let rosterTimer = 0
+let lastHeartbeatValue = ''
+let lastHeartbeatSeenAt = 0
+
+function normalize(value: string) {
+  return value.trim().toLowerCase()
+}
+
+function samePlayer(first: string, second: string) {
+  return normalize(first) === normalize(second)
+}
 
 function id() {
   return appState.localPlayer?.userId ?? ''
@@ -61,69 +34,149 @@ function nameFor(userId: string) {
   return profile?.name || `${userId.slice(0, 6)}...${userId.slice(-4)}`
 }
 
-function makeSessionId(first: string, second: string, nonce: string) {
-  return `${[first.toLowerCase(), second.toLowerCase()].sort().join('-')}-${nonce}`
+function markServerMessage() {
+  lastHeartbeatSeenAt = Date.now()
+  appState.serverAlive = true
+  appState.serverEverSeen = true
 }
 
-function formBond(partner: PlayerSummary, sessionId: string) {
+function requireServer() {
+  if (appState.serverAlive && room.isReady()) return true
+  appState.status = appState.serverEverSeen
+    ? 'Connection paused. Rejoining the shared-world server...'
+    : 'The shared-world server is waking up. This can take about 15 seconds.'
+  return false
+}
+
+function formBond(
+  partner: PlayerSummary,
+  sessionId: string,
+  progress: { level: number; totalSessions: number; totalPulses: number; streak: number }
+) {
   appState.partner = partner
   appState.sessionId = sessionId
   appState.phase = 'bonded'
   appState.score = 0
   appState.round = 0
-  appState.moteStage = 0
+  appState.moteStage = Math.min(3, Math.floor(progress.totalPulses / 12))
   appState.incomingInvite = undefined
   appState.outgoingTo = undefined
+  appState.outgoingNonce = ''
+  appState.cancelledInviteToId = ''
   appState.practice = false
-  appState.status = `${partner.name} accepted. Your shared Mote is awake.`
+  appState.bondLevel = progress.level
+  appState.totalSessions = progress.totalSessions
+  appState.totalPulses = progress.totalPulses
+  appState.streak = progress.streak
+  appState.saved = true
+  appState.status = progress.totalSessions > 0
+    ? `${partner.name} rejoined your level ${progress.level} Mote.`
+    : `${partner.name} accepted. Your shared Mote is awake.`
   createBondMote(id(), partner.userId)
+  setMoteStage(appState.moteStage)
+}
+
+function applyServerRound(data: {
+  success: boolean
+  delayMs: number
+  score: number
+  nextRound: number
+  nextPlayerId: string
+  complete: boolean
+  level: number
+  totalSessions: number
+  totalPulses: number
+  streak: number
+  saved: boolean
+}) {
+  appState.score = data.score
+  appState.moteStage = Math.min(3, Math.floor(data.score / 2))
+  appState.waitingForResponse = false
+  appState.pulseReady = false
+  appState.bondLevel = data.level
+  appState.totalSessions = data.totalSessions
+  appState.totalPulses = data.totalPulses
+  appState.streak = data.streak
+  appState.saved = data.saved
+  setMoteStage(appState.moteStage)
+
+  if (data.complete) {
+    appState.phase = 'complete'
+    appState.status = data.saved
+      ? `Bond saved: ${data.score}/${TOTAL_ROUNDS}. Return together to grow it.`
+      : `Bond complete: ${data.score}/${TOTAL_ROUNDS}. Save is retrying in the background.`
+    return
+  }
+
+  appState.round = data.nextRound
+  appState.expectedPlayerId = data.nextPlayerId
+  appState.status = data.success
+    ? `Connected in ${(data.delayMs / 1000).toFixed(2)}s. Roles reversed.`
+    : 'The pulse faded. Roles reversed; reconnect on the next one.'
 }
 
 export function setupGame() {
-  bus.on('we1:invite', (message: InviteMessage) => {
-    if (!id() || message.toId !== id() || appState.partner) return
-    appState.incomingInvite = {
-      fromId: message.fromId,
-      fromName: message.fromName,
-      nonce: message.nonce
-    }
+  room.onMessage('inviteReceived', (data) => {
+    markServerMessage()
+    if (!id() || appState.partner) return
+    appState.incomingInvite = data
     appState.phase = 'invited'
-    appState.status = `${message.fromName} wants to create something neither of you can own alone.`
+    appState.status = `${data.fromName} wants to create something neither of you can own alone.`
   })
 
-  bus.on('we1:invite-answer', (message: InviteAnswerMessage) => {
-    if (message.toId !== id()) return
-    if (!message.accepted) {
-      appState.outgoingTo = undefined
-      appState.phase = 'finding'
-      appState.status = `${message.fromName} passed for now. Choose someone else.`
+  room.onMessage('inviteSent', (data) => {
+    markServerMessage()
+    if (appState.cancelledInviteToId && samePlayer(appState.cancelledInviteToId, data.toId)) {
+      appState.cancelledInviteToId = ''
+      void room.send('cancelInvite', { nonce: data.nonce })
       return
     }
+    if (!appState.outgoingTo || !samePlayer(appState.outgoingTo.userId, data.toId)) return
+    appState.outgoingNonce = data.nonce
+  })
 
+  room.onMessage('inviteCancelled', (data) => {
+    markServerMessage()
+    if (!appState.incomingInvite || !samePlayer(appState.incomingInvite.fromId, data.fromId)) return
+    appState.incomingInvite = undefined
+    appState.phase = 'finding'
+    appState.status = 'That invitation was cancelled. No action is needed.'
+  })
+
+  room.onMessage('inviteDeclined', (data) => {
+    markServerMessage()
+    appState.outgoingTo = undefined
+    appState.outgoingNonce = ''
+    appState.phase = 'finding'
+    appState.status = `${data.byName} passed for now. Choose someone else.`
+  })
+
+  room.onMessage('bondReady', (data) => {
+    markServerMessage()
     formBond(
-      { userId: message.fromId, name: message.fromName, isGuest: false },
-      message.sessionId
+      { userId: data.partnerId, name: data.partnerName, isGuest: false },
+      data.sessionId,
+      data
     )
   })
 
-  bus.on('we1:start', (message: StartMessage) => {
-    if (
-      message.toId !== id() ||
-      message.sessionId !== appState.sessionId ||
-      appState.phase !== 'bonded'
-    ) return
-    beginRounds(message.firstPlayerId)
+  room.onMessage('sessionStarted', (data) => {
+    markServerMessage()
+    if (data.sessionId !== appState.sessionId) return
+    appState.phase = 'playing'
+    appState.round = data.round
+    appState.score = data.score
+    appState.expectedPlayerId = data.firstPlayerId
+    appState.pulseReady = false
+    appState.waitingForResponse = false
+    appState.status = samePlayer(data.firstPlayerId, id())
+      ? 'Your turn. Send the first pulse.'
+      : 'Stay ready. Your partner begins.'
   })
 
-  bus.on('we1:pulse', (message: PulseMessage) => {
-    if (
-      message.toId !== id() ||
-      message.sessionId !== appState.sessionId ||
-      appState.phase !== 'playing' ||
-      message.round !== appState.round ||
-      message.fromId !== appState.expectedPlayerId
-    ) return
-
+  room.onMessage('pulseArrived', (data) => {
+    markServerMessage()
+    if (data.sessionId !== appState.sessionId || data.round !== appState.round) return
     appState.pulseReady = true
     appState.pulseReceivedAt = Date.now()
     appState.waitingForResponse = false
@@ -131,95 +184,83 @@ export function setupGame() {
     pulseMote()
   })
 
-  bus.on('we1:response', (message: ResponseMessage) => {
-    if (
-      message.toId !== id() ||
-      message.sessionId !== appState.sessionId ||
-      appState.phase !== 'playing' ||
-      message.round !== appState.round
-    ) return
-    applyRoundResult(message.success, message.delayMs)
+  room.onMessage('roundResolved', (data) => {
+    markServerMessage()
+    if (data.sessionId !== appState.sessionId || data.round !== appState.round) return
+    applyServerRound(data)
+  })
+
+  room.onMessage('serverNotice', (data) => {
+    markServerMessage()
+    if (data.code === 'PARTNER_LEFT') {
+      resetExperience()
+      appState.status = data.message
+      return
+    }
+    if (data.code === 'PLAYER_LEFT' || data.code === 'INVITE_EXPIRED' || data.code === 'PLAYER_BUSY') {
+      appState.outgoingTo = undefined
+      appState.outgoingNonce = ''
+      if (!appState.partner) appState.phase = 'finding'
+    }
+    appState.status = data.message
   })
 }
 
 export function invitePlayer(player: PlayerSummary) {
   const local = appState.localPlayer
-  if (!local || player.userId === local.userId) return
-  const nonce = `${Date.now()}`
+  if (!local || samePlayer(player.userId, local.userId) || !requireServer()) return
   appState.outgoingTo = player
+  appState.outgoingNonce = ''
+  appState.cancelledInviteToId = ''
   appState.status = `Invitation sent to ${player.name}. Waiting for consent...`
-  bus.emit('we1:invite', {
-    fromId: local.userId,
-    fromName: local.name,
-    toId: player.userId,
-    nonce
-  } satisfies InviteMessage)
+  void room.send('inviteRequest', { toId: player.userId, fromName: local.name })
 }
 
 export function cancelInvite() {
+  if (appState.outgoingNonce && room.isReady()) {
+    void room.send('cancelInvite', { nonce: appState.outgoingNonce })
+  } else if (appState.outgoingTo) {
+    appState.cancelledInviteToId = appState.outgoingTo.userId
+  }
   appState.outgoingTo = undefined
+  appState.outgoingNonce = ''
   appState.status = 'Invitation cancelled. Choose someone when it feels right.'
 }
 
 export function acceptInvite() {
   const local = appState.localPlayer
   const invite = appState.incomingInvite
-  if (!local || !invite) return
-
-  const sessionId = makeSessionId(local.userId, invite.fromId, invite.nonce)
-  formBond(
-    { userId: invite.fromId, name: invite.fromName, isGuest: false },
-    sessionId
-  )
-  bus.emit('we1:invite-answer', {
-    accepted: true,
-    fromId: local.userId,
-    fromName: local.name,
-    toId: invite.fromId,
+  if (!local || !invite || !requireServer()) return
+  void room.send('inviteDecision', {
+    fromId: invite.fromId,
     nonce: invite.nonce,
-    sessionId
-  } satisfies InviteAnswerMessage)
+    accepted: true,
+    toName: local.name
+  })
+  appState.status = 'Creating your shared Mote...'
 }
 
 export function declineInvite() {
   const local = appState.localPlayer
   const invite = appState.incomingInvite
   if (!local || !invite) return
-  bus.emit('we1:invite-answer', {
-    accepted: false,
-    fromId: local.userId,
-    fromName: local.name,
-    toId: invite.fromId,
-    nonce: invite.nonce,
-    sessionId: ''
-  } satisfies InviteAnswerMessage)
+  if (requireServer()) {
+    void room.send('inviteDecision', {
+      fromId: invite.fromId,
+      nonce: invite.nonce,
+      accepted: false,
+      toName: local.name
+    })
+  }
   appState.incomingInvite = undefined
   appState.phase = 'finding'
   appState.status = 'No pressure. Find the right person when you are ready.'
 }
 
 export function startBondGame() {
-  const local = appState.localPlayer
-  const partner = appState.partner
-  if (!local || !partner || appState.phase !== 'bonded') return
-  const firstPlayerId = [local.userId, partner.userId].sort()[0]
-  beginRounds(firstPlayerId)
-  bus.emit('we1:start', {
-    sessionId: appState.sessionId,
-    fromId: local.userId,
-    toId: partner.userId,
-    firstPlayerId
-  } satisfies StartMessage)
-}
-
-function beginRounds(firstPlayerId: string) {
-  appState.phase = 'playing'
-  appState.round = 1
-  appState.score = 0
-  appState.expectedPlayerId = firstPlayerId
-  appState.pulseReady = false
-  appState.waitingForResponse = false
-  appState.status = firstPlayerId === id() ? 'Your turn. Send the first pulse.' : 'Stay ready. Your partner begins.'
+  if (appState.phase !== 'bonded' || !appState.sessionId || !requireServer()) return
+  appState.status = 'Asking the shared-world server to begin...'
+  void room.send('startRequest', { sessionId: appState.sessionId })
 }
 
 export function tapHeartbeat() {
@@ -227,65 +268,28 @@ export function tapHeartbeat() {
     tapPractice()
     return
   }
-  if (appState.phase !== 'playing' || !appState.partner) return
+  if (appState.phase !== 'playing' || !appState.partner || !requireServer()) return
 
   if (appState.pulseReady) {
-    respondToPulse()
+    appState.pulseReady = false
+    appState.waitingForResponse = true
+    appState.status = 'Answer sent. The shared Mote is listening...'
+    pulseMote()
+    void room.send('responseRequest', {
+      sessionId: appState.sessionId,
+      round: appState.round
+    })
     return
   }
-  if (appState.expectedPlayerId !== id() || appState.waitingForResponse) return
 
+  if (!samePlayer(appState.expectedPlayerId, id()) || appState.waitingForResponse) return
   appState.waitingForResponse = true
   appState.status = 'Pulse sent. Hold the connection open.'
   pulseMote()
-  bus.emit('we1:pulse', {
+  void room.send('pulseRequest', {
     sessionId: appState.sessionId,
-    round: appState.round,
-    fromId: id(),
-    toId: appState.partner.userId
-  } satisfies PulseMessage)
-}
-
-function respondToPulse(forceMiss = false) {
-  if (!appState.partner || !appState.pulseReady) return
-  const delayMs = Date.now() - appState.pulseReceivedAt
-  const success = !forceMiss && delayMs <= RESPONSE_WINDOW_MS
-  appState.pulseReady = false
-  pulseMote()
-  bus.emit('we1:response', {
-    sessionId: appState.sessionId,
-    round: appState.round,
-    fromId: id(),
-    toId: appState.partner.userId,
-    success,
-    delayMs
-  } satisfies ResponseMessage)
-  applyRoundResult(success, delayMs)
-}
-
-function applyRoundResult(success: boolean, delayMs: number) {
-  if (success) appState.score += 1
-  appState.moteStage = Math.min(3, Math.floor(appState.score / 2))
-  setMoteStage(appState.moteStage)
-
-  if (appState.round >= TOTAL_ROUNDS) {
-    appState.phase = 'complete'
-    appState.status = appState.score >= 6
-      ? `Bond formed: ${appState.score}/${TOTAL_ROUNDS}. This Mote now carries both of your rhythm.`
-      : `Bond found its first rhythm: ${appState.score}/${TOTAL_ROUNDS}. Try again and help it grow.`
-    return
-  }
-
-  const previousSender = appState.expectedPlayerId
-  appState.expectedPlayerId = previousSender === id()
-    ? appState.partner?.userId ?? ''
-    : id()
-  appState.round += 1
-  appState.waitingForResponse = false
-  appState.pulseReady = false
-  appState.status = success
-    ? `Connected in ${(delayMs / 1000).toFixed(2)}s. Roles reversed.`
-    : 'The pulse faded. Roles reversed; reconnect on the next one.'
+    round: appState.round
+  })
 }
 
 export function startPractice() {
@@ -316,6 +320,8 @@ export function resetExperience() {
   appState.phase = 'finding'
   appState.incomingInvite = undefined
   appState.outgoingTo = undefined
+  appState.outgoingNonce = ''
+  appState.cancelledInviteToId = ''
   appState.partner = undefined
   appState.sessionId = ''
   appState.round = 0
@@ -326,7 +332,14 @@ export function resetExperience() {
   appState.practice = false
   appState.practiceResolveAt = 0
   appState.moteStage = 0
-  appState.status = 'Choose someone in the scene and make a WE/1 bond.'
+  appState.bondLevel = 1
+  appState.totalSessions = 0
+  appState.totalPulses = 0
+  appState.streak = 0
+  appState.saved = true
+  appState.status = appState.serverAlive
+    ? 'Choose someone in the scene and make a WE/1 bond.'
+    : 'Waking the shared-world server...'
 }
 
 function refreshRoster() {
@@ -343,30 +356,46 @@ function refreshRoster() {
   const seen: Record<string, boolean> = {}
   const players: PlayerSummary[] = []
   for (const [, identity] of engine.getEntitiesWith(PlayerIdentityData)) {
-    if (
-      !identity.address ||
-      identity.address.toLowerCase() === localId.toLowerCase() ||
-      seen[identity.address]
-    ) continue
-    seen[identity.address] = true
-    const profile = getPlayer({ userId: identity.address })
+    const address = identity.address
+    const key = normalize(address)
+    if (!address || samePlayer(address, localId) || seen[key]) continue
+    seen[key] = true
+    const profile = getPlayer({ userId: address })
     players.push({
-      userId: identity.address,
-      name: profile?.name || nameFor(identity.address),
+      userId: address,
+      name: profile?.name || nameFor(address),
       isGuest: identity.isGuest
     })
   }
   appState.players = players.slice(0, 6)
 
   if (!appState.localPlayer) appState.status = 'Loading your Decentraland identity...'
-  else if (appState.phase === 'finding' && players.length === 0 && !appState.outgoingTo) {
+  else if (!appState.serverAlive && !appState.practice) {
+    appState.status = appState.serverEverSeen
+      ? 'Connection paused. Rejoining the shared-world server...'
+      : 'The shared-world server is waking up. Practice is available while you wait.'
+  } else if (appState.phase === 'finding' && players.length === 0 && !appState.outgoingTo) {
     appState.status = 'You are first here. Invite a friend, or try the rhythm in Practice.'
   } else if (appState.phase === 'finding' && !appState.outgoingTo) {
     appState.status = `${players.length} ${players.length === 1 ? 'person is' : 'people are'} ready to connect.`
   }
 }
 
+function refreshServerHealth() {
+  for (const [, status] of engine.getEntitiesWith(ServerStatus)) {
+    const heartbeat = String(status.heartbeatAt)
+    if (heartbeat !== lastHeartbeatValue) {
+      lastHeartbeatValue = heartbeat
+      lastHeartbeatSeenAt = Date.now()
+      appState.serverEverSeen = true
+    }
+  }
+  appState.serverAlive = room.isReady() && isStateSyncronized() &&
+    lastHeartbeatSeenAt > 0 && Date.now() - lastHeartbeatSeenAt <= SERVER_FRESHNESS_MS
+}
+
 export function updateGameSystem(dt: number) {
+  refreshServerHealth()
   rosterTimer += dt
   if (rosterTimer >= 1) {
     rosterTimer = 0
@@ -375,10 +404,6 @@ export function updateGameSystem(dt: number) {
 
   if (inputSystem.isTriggered(InputAction.IA_PRIMARY, PointerEventType.PET_DOWN)) {
     tapHeartbeat()
-  }
-
-  if (appState.pulseReady && Date.now() - appState.pulseReceivedAt > RESPONSE_WINDOW_MS) {
-    respondToPulse(true)
   }
 
   if (appState.practice && appState.practiceResolveAt > 0 && Date.now() >= appState.practiceResolveAt) {
